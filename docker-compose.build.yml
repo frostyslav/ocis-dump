@@ -1,0 +1,22 @@
+# Builds the image locally from the Dockerfile.
+#   docker compose -f docker-compose.build.yml run --rm ocis-dump
+#
+# Environment variables (all optional):
+#   OCIS_DATA_DIR  host path of the OCIS data root   (default: ./data)
+#   OUTPUT_DIR     host path for the dumped files     (default: ./output)
+#   VERSION        version string embedded in binary  (default: dev)
+services:
+  ocis-dump:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+    image: ocis-dump:${VERSION:-dev}
+    # Arguments after the `ocis-dump` entrypoint; override with `run ... dump ...`.
+    command: ["dump", "/data", "/output"]
+    volumes:
+      - ${OCIS_DATA_DIR:-./data}:/data:ro
+      - ${OUTPUT_DIR:-./output}:/output
+    # Run as the host user so dumped files are not owned by root.
+    # Set UID/GID in your shell or .env file if they differ from 1000.
+    user: "${UID:-1000}:${GID:-1000}"

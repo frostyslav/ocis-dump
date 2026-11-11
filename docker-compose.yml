@@ -1,0 +1,18 @@
+# Uses a prebuilt image instead of building locally.
+#   docker compose run --rm ocis-dump
+#
+# Environment variables (all optional):
+#   OCIS_IMAGE     image to run   (default: docker.io/frostyslav/ocis-dump:latest)
+#   OCIS_DATA_DIR  host path of the OCIS data root   (default: ./data)
+#   OUTPUT_DIR     host path for the dumped files     (default: ./output)
+services:
+  ocis-dump:
+    image: ${OCIS_IMAGE:-docker.io/frostyslav/ocis-dump:latest}
+    # Arguments after the `ocis-dump` entrypoint; override with `run ... dump ...`.
+    command: ["dump", "/data", "/output"]
+    volumes:
+      - ${OCIS_DATA_DIR:-./data}:/data:ro
+      - ${OUTPUT_DIR:-./output}:/output
+    # Run as the host user so dumped files are not owned by root.
+    # Set UID/GID in your shell or .env file if they differ from 1000.
+    user: "${UID:-1000}:${GID:-1000}"

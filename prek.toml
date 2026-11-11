@@ -1,0 +1,55 @@
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [
+  { id = "check-added-large-files" },
+  { id = "check-case-conflict" },
+  { id = "check-executables-have-shebangs" },
+  { id = "check-json" },
+  { id = "check-merge-conflict" },
+  { id = "check-shebang-scripts-are-executable" },
+  { id = "check-symlinks" },
+  { id = "check-xml" },
+  { id = "check-yaml" },
+  { id = "detect-aws-credentials", args = ["--allow-missing-credentials"] },
+  { id = "detect-private-key" },
+  { id = "end-of-file-fixer" },
+  { id = "fix-byte-order-marker" },
+  { id = "mixed-line-ending", args = ["--fix=lf"] },
+  { id = "no-commit-to-branch", args = ["--branch", "main", "--branch", "master"] },
+  { id = "pretty-format-json", args = ["--autofix"] },
+  { id = "trailing-whitespace" },
+]
+
+[[repos]]
+repo = "https://github.com/rhysd/actionlint"
+rev = "v1.7.12"
+hooks = [
+  { id = "actionlint" },
+]
+
+# Enforces Conventional Commits (feat:, fix:, docs:, ...) on the commit message.
+# Install with: prek install --hook-type commit-msg
+[[repos]]
+repo = "https://github.com/compilerla/conventional-pre-commit"
+rev = "v4.5.0"
+hooks = [
+  { id = "conventional-pre-commit", stages = ["commit-msg"] },
+]
+
+[[repos]]
+repo = "https://github.com/golangci/golangci-lint"
+rev = "v2.15.0"
+hooks = [
+  # Formatters configured in .golangci.yml (gofmt, goimports)
+  { id = "golangci-lint-fmt" },
+  # Linters configured in .golangci.yml (includes go vet)
+  { id = "golangci-lint-full" },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  { id = "go-mod-tidy", name = "go mod tidy", language = "system", entry = "go mod tidy -diff", files = "^go\\.(mod|sum)$|\\.go$", pass_filenames = false },
+  { id = "go-test", name = "go test", language = "system", entry = "go test ./...", types = ["go"], pass_filenames = false, stages = ["pre-push"] },
+]
