@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -900,4 +901,243 @@ func TestExecuteCopiesMkdirError(t *testing.T) {
 	if st.Errors != 1 || !strings.Contains(errb.String(), "FAILED") {
 		t.Errorf("%+v log=%q", st, errb.String())
 	}
+}
+
+// --- progress output ---------------------------------------------------
+
+func TestProgressOutput(t *testing.T) {
+	old := progressEvery
+	progressEvery = 0 // report on every opportunity
+	t.Cleanup(func() { progressEvery = old })
+
+	top := t.TempDir()
+	longSpace(t, top, true)
+	so, _, err := runDump(Options{TopDir: top, OutDir: filepath.Join(top, "out")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Found 1 space(s)",
+		"scanning metadata...",
+		"metadata files so far",
+		"found 2 metadata files, building file tree...",
+		"reading metadata:",
+		"found 1 file entries, checking blobs...",
+		"checking blobs:",
+		"processing 1 files with 2 workers...",
+	} {
+		if !strings.Contains(so, want) {
+			t.Errorf("output missing %q:\n%s", want, so)
+		}
+	}
+}
+
+func TestProgressQuietAndFast(t *testing.T) {
+	top := t.TempDir()
+	longSpace(t, top, true)
+
+	// Quiet: no phase or progress lines at all.
+	so, _, _ := runDump(Options{TopDir: top, OutDir: filepath.Join(top, "q"), Quiet: true})
+	if strings.Contains(so, "scanning metadata") || strings.Contains(so, "progress:") {
+		t.Errorf("quiet output has progress:\n%s", so)
+	}
+	// Default interval: phase headers show, throttled progress lines do not.
+	so, _, _ = runDump(Options{TopDir: top, OutDir: filepath.Join(top, "n")})
+	if !strings.Contains(so, "scanning metadata...") || strings.Contains(so, "progress:") || strings.Contains(so, "so far") {
+		t.Errorf("unexpected output:\n%s", so)
+	}
+	// Info mode stops before scanning.
+	so, _, _ = runDump(Options{TopDir: top, OutDir: filepath.Join(top, "i"), Info: true})
+	if strings.Contains(so, "scanning metadata") {
+		t.Errorf("info mode scanned:\n%s", so)
+	}
+}
+
+func TestTickerThrottles(t *testing.T) {
+	old := progressEvery
+	t.Cleanup(func() { progressEvery = old })
+
+	progressEvery = time.Hour
+	tk := newTicker()
+	if tk.due() {
+		t.Error("due immediately with a long interval")
+	}
+	progressEvery = 0
+	if !tk.due() {
+		t.Error("not due with a zero interval")
+	}
+}
+
+// --- timestamps --------------------------------------------------------
+
+func TestLoggerTimestamps(t *testing.T) {
+	fixed := time.Date(2026, 11, 11, 14, 30, 5, 0, time.UTC)
+	var out, errb bytes.Buffer
+	log := &logger{out: &out, err: &errb, verbose: true, now: func() time.Time { return fixed }}
+
+	log.info("hello %d", 1)
+	log.debug("dbg")
+	log.warn("careful")
+	log.error("boom")
+
+	if want := "2026-11-11 14:30:05 hello 1\n2026-11-11 14:30:05 dbg\n"; out.String() != want {
+		t.Errorf("stdout = %q, want %q", out.String(), want)
+	}
+	if want := "2026-11-11 14:30:05 WARNING: careful\n2026-11-11 14:30:05 ERROR: boom\n"; errb.String() != want {
+		t.Errorf("stderr = %q, want %q", errb.String(), want)
+	}
+}
+
+func TestLoggerDefaultClock(t *testing.T) {
+	var out bytes.Buffer
+	log := &logger{out: &out}
+	log.info("x")
+	if !regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} x\n$`).MatchString(out.String()) {
+		t.Errorf("got %q", out.String())
+	}
+}
+
+func TestRunLinesAreTimestampedExceptData(t *testing.T) {
+	top := t.TempDir()
+	longSpace(t, top, true)
+	ts := regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} `)
+
+	so, _, err := runDump(Options{TopDir: top, OutDir: filepath.Join(top, "out")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimRight(so, "\n"), "\n") {
+		// Blank separators and the summary block are plain; everything else is stamped.
+		plain := line == "" || line == "--- Summary ---" || strings.HasPrefix(line, "Copied:") ||
+			strings.HasPrefix(line, "Skipped:") || strings.HasPrefix(line, "Errors:") ||
+			strings.HasPrefix(line, "Folders:") || strings.HasPrefix(line, "Data:") || strings.HasPrefix(line, "Time:")
+		if !plain && !ts.MatchString(line) {
+			t.Errorf("line without timestamp: %q", line)
+		}
+	}
+
+	// --list output is data and must stay machine-readable.
+	so, _, _ = runDump(Options{TopDir: top, OutDir: filepath.Join(top, "out2"), List: true})
+	if !strings.Contains(so, "\n  ./hello.txt\n") {
+		t.Errorf("list line was altered:\n%s", so)
+	}
+
+	// Quiet mode prints only the summary, with no stray blank separator.
+	so, _, _ = runDump(Options{TopDir: top, OutDir: filepath.Join(top, "out3"), Quiet: true})
+	if !strings.HasPrefix(so, "\n--- Summary ---\n") || strings.Contains(so, "\n\n") {
+		t.Errorf("unexpected blank lines in quiet output:\n%q", so)
+	}
+}
+
+// --- progress helpers --------------------------------------------------
+
+func TestReportProgress(t *testing.T) {
+	log, out, _ := testLogger()
+	st := &Stats{Copied: 7, Skipped: 2, Errors: 1, BytesCopied: 10 * 1024 * 1024}
+	inflight := []flightProgress{
+		{name: "big.iso", done: 512 * 1024 * 1024, total: 1024 * 1024 * 1024},
+		{name: "tiny.txt", done: 5, total: 10}, // below bigFile: not listed
+	}
+	opt := Options{FileProgress: true, FileProgressMinSize: DefaultFileProgressMinSize}
+	reportProgress(log, opt, 10, 40, st, 0, time.Now().Add(-2*time.Second), inflight)
+
+	s := out.String()
+	for _, want := range []string{
+		"progress: 10/40 (25%), copied 7, skipped 2, errors 1 | 522.0 MiB @ ",
+		"/s",
+		"copying big.iso (512.0 MiB / 1.0 GiB)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("output missing %q:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "tiny.txt") {
+		t.Errorf("small file was listed:\n%s", s)
+	}
+}
+
+func TestReportProgressNothingDoneYet(t *testing.T) {
+	log, out, _ := testLogger()
+	reportProgress(log, Options{}, 0, 0, &Stats{}, 0, time.Now(), nil)
+	if !strings.Contains(out.String(), "progress: 0/0 (0%), copied 0, skipped 0, errors 0 | 0 bytes\n") {
+		t.Errorf("got %q", out.String())
+	}
+}
+
+func TestFlightSnapshot(t *testing.T) {
+	d := t.TempDir()
+	src := filepath.Join(d, "src.bin")
+	writeFile(t, src, strings.Repeat("x", 100))
+	dst := filepath.Join(d, "out", "b.bin")
+	writeFile(t, dst, strings.Repeat("y", 40)) // partially written
+
+	f := newFlight()
+	f.start(1, task{src, dst})
+	f.start(2, task{src, filepath.Join(d, "out", "a.bin")}) // not created yet
+
+	snap := f.snapshot()
+	if len(snap) != 2 || snap[0].name != "a.bin" || snap[0].done != 0 || snap[0].total != 100 ||
+		snap[1].name != "b.bin" || snap[1].done != 40 {
+		t.Errorf("snapshot = %+v", snap)
+	}
+	f.finish(1)
+	f.finish(2)
+	if len(f.snapshot()) != 0 {
+		t.Error("finished files still in flight")
+	}
+}
+
+func TestProcessTask(t *testing.T) {
+	d := t.TempDir()
+	src := filepath.Join(d, "src")
+	writeFile(t, src, "data")
+	dst := filepath.Join(d, "out", "f")
+
+	if r := processTask(task{src, dst}, false); r.status != "copied" || r.n != 4 {
+		t.Errorf("first: %+v", r)
+	}
+	if r := processTask(task{src, dst}, false); r.status != "skipped" {
+		t.Errorf("second: %+v", r)
+	}
+	if r := processTask(task{src, dst}, true); r.status != "copied" {
+		t.Errorf("forced: %+v", r)
+	}
+	if r := processTask(task{filepath.Join(d, "missing"), dst}, true); r.status != "error" || r.err == nil {
+		t.Errorf("missing source: %+v", r)
+	}
+}
+
+func TestReportProgressFileLineOptions(t *testing.T) {
+	inflight := []flightProgress{
+		{name: "small.bin", done: 1024, total: 2 * 1024},
+		{name: "large.bin", done: 10 * 1024 * 1024, total: 100 * 1024 * 1024},
+	}
+	report := func(opt Options) string {
+		log, out, _ := testLogger()
+		reportProgress(log, opt, 1, 2, &Stats{}, 0, time.Now(), inflight)
+		return out.String()
+	}
+
+	t.Run("disabled", func(t *testing.T) {
+		s := report(Options{FileProgress: false, FileProgressMinSize: 0})
+		if !strings.Contains(s, "progress: 1/2") || strings.Contains(s, "copying ") {
+			t.Errorf("output:\n%s", s)
+		}
+	})
+	t.Run("min size 0 lists everything", func(t *testing.T) {
+		s := report(Options{FileProgress: true})
+		if !strings.Contains(s, "copying small.bin") || !strings.Contains(s, "copying large.bin (10.0 MiB / 100.0 MiB)") {
+			t.Errorf("output:\n%s", s)
+		}
+	})
+	t.Run("min size filters", func(t *testing.T) {
+		s := report(Options{FileProgress: true, FileProgressMinSize: 50 * 1024 * 1024})
+		if !strings.Contains(s, "copying large.bin") || strings.Contains(s, "small.bin") {
+			t.Errorf("output:\n%s", s)
+		}
+		s = report(Options{FileProgress: true, FileProgressMinSize: 200 * 1024 * 1024})
+		if strings.Contains(s, "copying ") {
+			t.Errorf("output:\n%s", s)
+		}
+	})
 }

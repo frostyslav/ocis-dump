@@ -289,3 +289,59 @@ func TestDumpDefaultTopDir(t *testing.T) {
 		}
 	})
 }
+
+func TestDumpFileProgressFlags(t *testing.T) {
+	top := ocisFixture(t)
+	out := func() string { return filepath.Join(t.TempDir(), "o") }
+
+	t.Run("min size must be valid", func(t *testing.T) {
+		code, _, se := run("dump", "--file-progress-min-size", "lots", top, out())
+		if code != 1 || !strings.Contains(se, "--file-progress-min-size") {
+			t.Errorf("code=%d stderr=%q", code, se)
+		}
+	})
+	t.Run("accepts sizes and disabling", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"dump", "--file-progress-min-size", "512KiB", top, out()},
+			{"dump", "--file-progress-min-size=0", top, out()},
+			{"dump", "--file-progress=false", top, out()},
+		} {
+			if code, _, se := run(args...); code != 0 {
+				t.Errorf("%v: code=%d stderr=%q", args, code, se)
+			}
+		}
+	})
+	t.Run("env vars set the defaults", func(t *testing.T) {
+		t.Setenv("OCIS_DUMP_FILE_PROGRESS", "false")
+		t.Setenv("OCIS_DUMP_FILE_PROGRESS_MIN_SIZE", "10MiB")
+		dumpCmd, _, err := NewRootCmd("test").Find([]string{"dump"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := dumpCmd.Flags().Lookup("file-progress").DefValue; got != "false" {
+			t.Errorf("file-progress default = %q, want false", got)
+		}
+		if got := dumpCmd.Flags().Lookup("file-progress-min-size").DefValue; got != "10MiB" {
+			t.Errorf("min-size default = %q, want 10MiB", got)
+		}
+		if code, _, se := run("dump", top, out()); code != 0 {
+			t.Errorf("code=%d stderr=%q", code, se)
+		}
+	})
+	t.Run("flags override env vars", func(t *testing.T) {
+		t.Setenv("OCIS_DUMP_FILE_PROGRESS_MIN_SIZE", "garbage")
+		if code, _, _ := run("dump", top, out()); code != 1 {
+			t.Errorf("garbage env should fail, code=%d", code)
+		}
+		if code, _, se := run("dump", "--file-progress-min-size=1MiB", top, out()); code != 0 {
+			t.Errorf("flag should win over env: code=%d stderr=%q", code, se)
+		}
+	})
+	t.Run("invalid env bool", func(t *testing.T) {
+		t.Setenv("OCIS_DUMP_FILE_PROGRESS", "maybe")
+		code, _, se := run("dump", top, out())
+		if code != 1 || !strings.Contains(se, "OCIS_DUMP_FILE_PROGRESS") {
+			t.Errorf("code=%d stderr=%q", code, se)
+		}
+	})
+}

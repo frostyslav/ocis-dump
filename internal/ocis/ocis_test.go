@@ -214,3 +214,61 @@ func TestFindAllMPKsSkipsUnreadableDirs(t *testing.T) {
 		t.Errorf("got %v", got)
 	}
 }
+
+func TestWalkMPKsReportsProgress(t *testing.T) {
+	d := t.TempDir()
+	for _, f := range []string{"a.mpk", "sub/b.mpk", "sub/c.mpk", "skip.txt"} {
+		touch(t, filepath.Join(d, f))
+	}
+	var counts []int
+	got := WalkMPKs(d, func(n int) { counts = append(counts, n) })
+	if len(got) != 3 || len(counts) != 3 || counts[0] != 1 || counts[2] != 3 {
+		t.Errorf("got %v, counts %v", got, counts)
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	tests := []struct {
+		in   string
+		want int64
+	}{
+		{"0", 0},
+		{"4096", 4096},
+		{"512b", 512},
+		{"512 bytes", 512},
+		{"1k", 1024},
+		{"1KiB", 1024},
+		{"1KB", 1000},
+		{"1MiB", 1024 * 1024},
+		{"1 MiB", 1024 * 1024},
+		{"1.5MiB", 1572864},
+		{"10mb", 10_000_000},
+		{"2GiB", 2 * 1024 * 1024 * 1024},
+		{"1GB", 1_000_000_000},
+		{"  3 g ", 3 * 1024 * 1024 * 1024},
+	}
+	for _, tc := range tests {
+		got, err := ParseSize(tc.in)
+		if err != nil || got != tc.want {
+			t.Errorf("ParseSize(%q) = %d, %v; want %d", tc.in, got, err, tc.want)
+		}
+	}
+}
+
+func TestParseSizeErrors(t *testing.T) {
+	for _, in := range []string{"", "abc", "MiB", "-1MiB", "1XB", "1.2.3MiB", "NaN", "1 M iB"} {
+		if _, err := ParseSize(in); err == nil {
+			t.Errorf("ParseSize(%q): expected error", in)
+		}
+	}
+}
+
+func TestParseSizeRoundTripsFormatSize(t *testing.T) {
+	for _, n := range []int64{512, 2048, 5 * 1024 * 1024, 3 * 1024 * 1024 * 1024} {
+		v, u := FormatSize(n)
+		got, err := ParseSize(v + u)
+		if err != nil || got != n {
+			t.Errorf("round trip %d -> %s%s -> %d (%v)", n, v, u, got, err)
+		}
+	}
+}

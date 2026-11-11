@@ -96,6 +96,12 @@ func LoadMPKRaw(path string) (map[string]any, error) {
 
 // FindAllMPKs walks root and returns every *.mpk file path.
 func FindAllMPKs(root string) []string {
+	return WalkMPKs(root, nil)
+}
+
+// WalkMPKs is like FindAllMPKs but calls onFound (if not nil) with the running
+// count each time another *.mpk file is found, so callers can report progress.
+func WalkMPKs(root string, onFound func(count int)) []string {
 	var out []string
 	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -103,6 +109,9 @@ func FindAllMPKs(root string) []string {
 		}
 		if !d.IsDir() && strings.HasSuffix(d.Name(), ".mpk") {
 			out = append(out, p)
+			if onFound != nil {
+				onFound(len(out))
+			}
 		}
 		return nil
 	})
@@ -145,4 +154,33 @@ func round2(f float64) string {
 		s += ".0"
 	}
 	return s
+}
+
+// sizeUnits maps a lower-case suffix to its multiplier. K/M/G and the *iB
+// forms are binary (1024); KB/MB/GB are decimal (1000).
+var sizeUnits = map[string]float64{
+	"": 1, "b": 1, "byte": 1, "bytes": 1,
+	"k": kib, "kib": kib, "kb": 1e3,
+	"m": mib, "mib": mib, "mb": 1e6,
+	"g": gib, "gib": gib, "gb": 1e9,
+}
+
+// ParseSize parses a human readable size such as "4096", "512KiB", "1.5 MiB"
+// or "2GB" into bytes. It is the counterpart of FormatSize.
+func ParseSize(s string) (int64, error) {
+	t := strings.ToLower(strings.TrimSpace(s))
+	i := len(t)
+	for i > 0 && (t[i-1] < '0' || t[i-1] > '9') && t[i-1] != '.' {
+		i--
+	}
+	num, unit := t[:i], strings.TrimSpace(t[i:])
+	mult, ok := sizeUnits[unit]
+	if !ok {
+		return 0, fmt.Errorf("invalid size %q: unknown unit %q", s, unit)
+	}
+	v, err := strconv.ParseFloat(strings.TrimSpace(num), 64)
+	if err != nil || v < 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("invalid size %q", s)
+	}
+	return int64(v * mult), nil
 }

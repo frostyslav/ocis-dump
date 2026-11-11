@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +17,10 @@ import (
 
 // DefaultStoragePrefix is the spaces path within the OCIS data directory.
 const DefaultStoragePrefix = "storage/users/spaces"
+
+// DefaultFileProgressMinSize is the default size (bytes) from which an
+// in-flight copy gets its own progress line.
+const DefaultFileProgressMinSize int64 = 1 << 20
 
 // Options are the parsed CLI options.
 type Options struct {
@@ -31,6 +36,11 @@ type Options struct {
 	Verbose       bool
 	Quiet         bool
 	StoragePrefix string
+
+	// FileProgress adds a "copying <file> (x / y)" line to each progress report
+	// for in-flight files of at least FileProgressMinSize bytes.
+	FileProgress        bool
+	FileProgressMinSize int64
 }
 
 // Stats accumulates copy statistics.
@@ -48,28 +58,57 @@ type logger struct {
 	err     io.Writer
 	verbose bool
 	quiet   bool
+	now     func() time.Time // clock for timestamps; time.Now when nil
+}
+
+// printf writes a timestamped line: "2006-01-02 15:04:05 <message>".
+func (l *logger) printf(w io.Writer, format string, a ...any) {
+	now := time.Now
+	if l.now != nil {
+		now = l.now
+	}
+	fmt.Fprintf(w, "%s "+format+"\n", append([]any{now().Format(time.DateTime)}, a...)...)
 }
 
 func (l *logger) info(format string, a ...any) {
 	if !l.quiet {
-		fmt.Fprintf(l.out, format+"\n", a...)
+		l.printf(l.out, format, a...)
 	}
+}
+
+// progressEvery is the minimum time between two progress lines.
+var progressEvery = 2 * time.Second
+
+// ticker rate-limits progress output. The first call to due is always true
+// after the interval has passed since creation, so short runs stay quiet.
+type ticker struct {
+	last time.Time
+}
+
+func newTicker() *ticker { return &ticker{last: time.Now()} }
+
+func (t *ticker) due() bool {
+	if now := time.Now(); now.Sub(t.last) >= progressEvery {
+		t.last = now
+		return true
+	}
+	return false
 }
 
 func (l *logger) debug(format string, a ...any) {
 	if l.verbose {
-		fmt.Fprintf(l.out, format+"\n", a...)
+		l.printf(l.out, format, a...)
 	}
 }
 
 func (l *logger) warn(format string, a ...any) {
 	if !l.quiet {
-		fmt.Fprintf(l.err, "WARNING: "+format+"\n", a...)
+		l.printf(l.err, "WARNING: "+format, a...)
 	}
 }
 
 func (l *logger) error(format string, a ...any) {
-	fmt.Fprintf(l.err, "ERROR: "+format+"\n", a...)
+	l.printf(l.err, "ERROR: "+format, a...)
 }
 
 // spaceInfo holds metadata read from a space's root node.
@@ -208,7 +247,11 @@ func buildFileTree(mpks []string, spaceID, nodesDir string, log *logger) []fileE
 		log:      log,
 	}
 	var files []fileEntry
-	for _, p := range mpks {
+	tk := newTicker()
+	for i, p := range mpks {
+		if tk.due() {
+			log.info("    reading metadata: %d/%d", i, len(mpks))
+		}
 		n, err := r.info(p)
 		if err != nil {
 			log.warn("Skipping %s: %v", p, err)
@@ -273,7 +316,11 @@ type task struct{ src, dst string }
 func collectTasks(files []fileEntry, nodeDir string, sp spaceInfo, opt Options, log *logger) []task {
 	var tasks []task
 	absOut, _ := filepath.Abs(opt.OutDir)
-	for _, f := range files {
+	tk := newTicker()
+	for i, f := range files {
+		if tk.due() {
+			log.info("    checking blobs: %d/%d", i, len(files))
+		}
 		blob := filepath.Join(nodeDir, "blobs", ocis.Fourslashes(f.BlobID))
 		if !isFile(blob) {
 			continue
@@ -322,35 +369,20 @@ func executeCopies(tasks []task, opt Options, stats *Stats, log *logger) {
 		return
 	}
 
-	type result struct {
-		dst    string
-		status string // copied | skipped | error
-		n      int64
-		err    error
-	}
 	jobs := max(opt.Jobs, 1)
 	in := make(chan task)
-	res := make(chan result)
+	res := make(chan copyResult)
+	flight := newFlight()
 	var wg sync.WaitGroup
-	for range jobs {
+	for id := range jobs {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for t := range in {
-				if err := os.MkdirAll(filepath.Dir(t.dst), 0o755); err != nil {
-					res <- result{dst: t.dst, status: "error", err: err}
-					continue
-				}
-				if !opt.Force && !needsCopy(t.src, t.dst) {
-					res <- result{dst: t.dst, status: "skipped"}
-					continue
-				}
-				n, err := copyFile(t.src, t.dst)
-				if err != nil {
-					res <- result{dst: t.dst, status: "error", err: err}
-					continue
-				}
-				res <- result{dst: t.dst, status: "copied", n: n}
+				flight.start(id, t)
+				r := processTask(t, opt.Force)
+				flight.finish(id)
+				res <- r
 			}
 		}()
 	}
@@ -363,19 +395,143 @@ func executeCopies(tasks []task, opt Options, stats *Stats, log *logger) {
 		close(res)
 	}()
 
-	for r := range res {
-		name := filepath.Base(r.dst)
-		switch r.status {
-		case "copied":
-			stats.Copied++
-			stats.BytesCopied += r.n
-			log.debug("    Saved %s", name)
-		case "skipped":
-			stats.Skipped++
-			log.debug("    Skipped %s (unchanged)", name)
-		default:
-			stats.Errors++
-			log.error("    FAILED %s: %v", name, r.err)
+	log.info("  processing %d files with %d workers...", len(tasks), jobs)
+	// Progress is driven by its own timer, not by finished files, so it keeps
+	// reporting while a few large files are still being copied.
+	tick := time.NewTicker(max(progressEvery, time.Millisecond))
+	defer tick.Stop()
+	start, baseBytes, done := time.Now(), stats.BytesCopied, 0
+	for {
+		select {
+		case <-tick.C:
+			reportProgress(log, opt, done, len(tasks), stats, baseBytes, start, flight.snapshot())
+		case r, ok := <-res:
+			if !ok {
+				return
+			}
+			done++
+			name := filepath.Base(r.dst)
+			switch r.status {
+			case "copied":
+				stats.Copied++
+				stats.BytesCopied += r.n
+				log.debug("    Saved %s", name)
+			case "skipped":
+				stats.Skipped++
+				log.debug("    Skipped %s (unchanged)", name)
+			default:
+				stats.Errors++
+				log.error("    FAILED %s: %v", name, r.err)
+			}
+		}
+	}
+}
+
+type copyResult struct {
+	dst    string
+	status string // copied | skipped | error
+	n      int64
+	err    error
+}
+
+// processTask copies one file unless it is unchanged (and force is off).
+func processTask(t task, force bool) copyResult {
+	if err := os.MkdirAll(filepath.Dir(t.dst), 0o755); err != nil {
+		return copyResult{dst: t.dst, status: "error", err: err}
+	}
+	if !force && !needsCopy(t.src, t.dst) {
+		return copyResult{dst: t.dst, status: "skipped"}
+	}
+	n, err := copyFile(t.src, t.dst)
+	if err != nil {
+		return copyResult{dst: t.dst, status: "error", err: err}
+	}
+	return copyResult{dst: t.dst, status: "copied", n: n}
+}
+
+// flight tracks the files workers are currently copying.
+type flight struct {
+	mu    sync.Mutex
+	files map[int]flightFile
+}
+
+type flightFile struct {
+	dst   string
+	total int64
+}
+
+// flightProgress is a snapshot of one in-flight copy.
+type flightProgress struct {
+	name        string
+	done, total int64
+}
+
+func newFlight() *flight { return &flight{files: map[int]flightFile{}} }
+
+func (f *flight) start(id int, t task) {
+	var total int64
+	if st, err := os.Stat(t.src); err == nil {
+		total = st.Size()
+	}
+	f.mu.Lock()
+	f.files[id] = flightFile{dst: t.dst, total: total}
+	f.mu.Unlock()
+}
+
+func (f *flight) finish(id int) {
+	f.mu.Lock()
+	delete(f.files, id)
+	f.mu.Unlock()
+}
+
+// snapshot returns the in-flight copies, sorted by name, with the bytes
+// written so far (read from the size of the partially written destination).
+func (f *flight) snapshot() []flightProgress {
+	f.mu.Lock()
+	cur := make([]flightFile, 0, len(f.files))
+	for _, ff := range f.files {
+		cur = append(cur, ff)
+	}
+	f.mu.Unlock()
+
+	out := make([]flightProgress, 0, len(cur))
+	for _, ff := range cur {
+		var written int64
+		if st, err := os.Stat(ff.dst); err == nil {
+			written = min(st.Size(), ff.total)
+		}
+		out = append(out, flightProgress{name: filepath.Base(ff.dst), done: written, total: ff.total})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
+	return out
+}
+
+func humanSize(n int64) string {
+	v, u := ocis.FormatSize(n)
+	return v + " " + u
+}
+
+func reportProgress(log *logger, opt Options, done, total int, stats *Stats, baseBytes int64, start time.Time, inflight []flightProgress) {
+	bytes := stats.BytesCopied - baseBytes
+	for _, f := range inflight {
+		bytes += f.done
+	}
+	pct := 0
+	if total > 0 {
+		pct = done * 100 / total
+	}
+	rate := ""
+	if el := time.Since(start).Seconds(); el > 0 && bytes > 0 {
+		rate = " @ " + humanSize(int64(float64(bytes)/el)) + "/s"
+	}
+	log.info("    progress: %d/%d (%d%%), copied %d, skipped %d, errors %d | %s%s",
+		done, total, pct, stats.Copied, stats.Skipped, stats.Errors, humanSize(bytes), rate)
+	if !opt.FileProgress {
+		return
+	}
+	for _, f := range inflight {
+		if f.total >= opt.FileProgressMinSize {
+			log.info("      copying %s (%s / %s)", f.name, humanSize(f.done), humanSize(f.total))
 		}
 	}
 }
@@ -405,6 +561,7 @@ func Run(opt Options, stdout, stderr io.Writer) error {
 	var stats Stats
 
 	nodes, _ := filepath.Glob(filepath.Join(opt.TopDir, opt.StoragePrefix, "*", "*", "nodes"))
+	log.info("Found %d space(s)", len(nodes))
 	for _, node := range nodes {
 		nodeDir := filepath.Dir(node)
 		spaceID := filepath.Base(filepath.Dir(nodeDir)) + filepath.Base(nodeDir)
@@ -425,7 +582,10 @@ func Run(opt Options, stdout, stderr io.Writer) error {
 			continue
 		}
 
-		log.info("\n[%s/%s]", sp.Type, sp.Name)
+		if !opt.Quiet {
+			fmt.Fprintln(stdout) // blank separator line, no timestamp
+		}
+		log.info("[%s/%s]", sp.Type, sp.Name)
 		log.info("  username:  %s", sp.User)
 		log.info("  root:      %s", rootID)
 		log.info("  tree size: %s %s", sp.Size, sp.SizeUnit)
@@ -433,7 +593,16 @@ func Run(opt Options, stdout, stderr io.Writer) error {
 		if opt.Info {
 			continue
 		}
-		files := buildFileTree(ocis.FindAllMPKs(nodeDir), spaceID, node, log)
+		log.info("  scanning metadata...")
+		tk := newTicker()
+		mpks := ocis.WalkMPKs(nodeDir, func(n int) {
+			if tk.due() {
+				log.info("    ...%d metadata files so far", n)
+			}
+		})
+		log.info("  found %d metadata files, building file tree...", len(mpks))
+		files := buildFileTree(mpks, spaceID, node, log)
+		log.info("  found %d file entries, checking blobs...", len(files))
 		tasks := collectTasks(files, nodeDir, sp, opt, log)
 		executeCopies(tasks, opt, &stats, log)
 		stats.Folders += countFolders(files, nodeDir)

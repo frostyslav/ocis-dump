@@ -1,6 +1,6 @@
 # OCIS Storage Dump Utility (Go)
 
-Inspired by the Python tool [dylarm/ocis-storage-dumper](https://github.com/dylarm/ocis-storage-dumper), reimplemented in Go. Extracts files from an OCIS instance (personal or project spaces) into a standard POSIX directory structure. Ships as a single static binary.
+Inspired by the Python tool [dylarm/ocis-storage-dumper](https://github.com/dylarm/ocis-storage-dumper), reimplemented in Go. Extracts files from an OCIS ([ownCloud Infinite Scale](https://github.com/owncloud/ocis)) instance (personal or project spaces) into a standard POSIX directory structure. Ships as a single static binary.
 
 ## Build
 
@@ -37,8 +37,19 @@ Global flags: `-v, --verbose` and `-q, --quiet` (mutually exclusive; `--quiet` a
 | `-f, --force` | Overwrite even if unchanged |
 | `-j, --jobs N` | Parallel copy workers (default: 4) |
 | `--storage-prefix PATH` | Default: `storage/users/spaces` |
+| `--file-progress[=false]` | Show a line per large file being copied in each progress report (default: on). Env: `OCIS_DUMP_FILE_PROGRESS` |
+| `--file-progress-min-size SIZE` | Smallest file to show, e.g. `512KiB`, `10MiB`, `1GiB` (default: `1MiB`). Env: `OCIS_DUMP_FILE_PROGRESS_MIN_SIZE` |
 
 Copies are incremental (size + mtime comparison).
+
+While copying, a progress line is printed every 2 seconds (files done, bytes, speed). With `--file-progress`, files above the size threshold also get their own line showing how much has been written. Flags override the environment variables, which are convenient in a compose file:
+
+```yaml
+    environment:
+      OCIS_DUMP_FILE_PROGRESS_MIN_SIZE: 100MiB
+```
+
+Sizes accept `KiB/MiB/GiB` (binary), `KB/MB/GB` (decimal), or plain bytes.
 
 ```bash
 ocis-dump dump /srv/ocis ./backup
