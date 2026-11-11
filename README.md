@@ -89,5 +89,6 @@ GitHub Actions runs lint, actionlint and tests on every push and pull request, t
 | Pull request | Image is built, not pushed |
 | Push to `main` | Pushes `frostyslav/ocis-dump:edge` and `:latest` |
 | Tag `v1.2.3` | Pushes `:1.2.3`, `:1.2` and `:1` (the version is embedded in the binary) |
+| Manual run (Actions tab, *Run workflow*) | Image is built; pushed as `:<branch>` only if "Push the Docker image" is ticked |
 
 Set these repository secrets for pushing to Docker Hub: `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` (an access token with write permission).
