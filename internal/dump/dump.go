@@ -286,6 +286,27 @@ func needsCopy(src, dst string) bool {
 	return srcSt.Size() != dstSt.Size() || !srcSt.ModTime().Equal(dstSt.ModTime())
 }
 
+// copyReason explains why needsCopy would return true, for dry-run output.
+func copyReason(src, dst string) string {
+	dstSt, err := os.Stat(dst)
+	if err != nil {
+		return "destination missing"
+	}
+	srcSt, err := os.Stat(src)
+	if err != nil {
+		return "source unreadable"
+	}
+	var parts []string
+	if srcSt.Size() != dstSt.Size() {
+		parts = append(parts, fmt.Sprintf("size %d != %d", srcSt.Size(), dstSt.Size()))
+	}
+	if !srcSt.ModTime().Equal(dstSt.ModTime()) {
+		parts = append(parts, fmt.Sprintf("mtime %s != %s",
+			srcSt.ModTime().Format(time.RFC3339Nano), dstSt.ModTime().Format(time.RFC3339Nano)))
+	}
+	return strings.Join(parts, ", ")
+}
+
 // copyFile copies src to dst preserving the modification time.
 func copyFile(src, dst string) (int64, error) {
 	in, err := os.Open(src)
@@ -358,8 +379,11 @@ func executeCopies(tasks []task, opt Options, stats *Stats, log *logger) {
 	if opt.DryRun {
 		var would []string
 		for _, t := range tasks {
-			if opt.Force || needsCopy(t.src, t.dst) {
+			switch {
+			case opt.Force:
 				would = append(would, t.dst)
+			case needsCopy(t.src, t.dst):
+				would = append(would, t.dst+" ("+copyReason(t.src, t.dst)+")")
 			}
 		}
 		log.info("  Dry run: %d would copy, %d would skip", len(would), len(tasks)-len(would))
