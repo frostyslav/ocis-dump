@@ -95,6 +95,7 @@ topdir is the OCIS data root (default: $HOME/.ocis); outdir defaults to ".".`,
 	f.StringVar(&opt.Username, "username", "", "Filter by actual username (substring, case-insensitive)")
 	f.BoolVarP(&opt.Info, "info", "i", false, "Only show space info, skip file tree")
 	f.BoolVarP(&opt.Force, "force", "f", false, "Force overwrite of all files, even if unchanged")
+	f.StringVar(&opt.ChangesDir, "changes-dir", "", "Also place every copied file (new or updated) into this directory, hardline when possible")
 	f.IntVarP(&opt.Jobs, "jobs", "j", 4, "Number of parallel copy workers")
 	f.StringVar(&opt.StoragePrefix, "storage-prefix", dump.DefaultStoragePrefix, "Spaces path within the OCIS data directory")
 	f.BoolVar(&opt.FileProgress, "file-progress", envBool(envFileProgress, true, &envErr),

@@ -36,11 +36,14 @@ Global flags: `-v, --verbose` and `-q, --quiet` (mutually exclusive; `--quiet` a
 | `-i, --info` | Only show space info |
 | `-f, --force` | Overwrite even if unchanged |
 | `-j, --jobs N` | Parallel copy workers (default: 4) |
+| `--changes-dir DIR` | Also place every file copied in this run (new or updated) into `DIR`, at the same relative path |
 | `--storage-prefix PATH` | Default: `storage/users/spaces` |
 | `--file-progress[=false]` | Show a line per large file being copied in each progress report (default: on). Env: `OCIS_DUMP_FILE_PROGRESS` |
 | `--file-progress-min-size SIZE` | Smallest file to show, e.g. `512KiB`, `10MiB`, `1GiB` (default: `1MiB`). Env: `OCIS_DUMP_FILE_PROGRESS_MIN_SIZE` |
 
 Copies are incremental (size + mtime comparison).
+
+With `--changes-dir`, each file copied in a run is also placed under `DIR` at the same relative path as in `outdir`. Unchanged files are not. Files are hardlinked when `DIR` is on the same filesystem as `outdir`, and copied otherwise. Each file is staged under a hidden `.ocis-dump.tmp` name and renamed into place, so a program watching `DIR` never sees a partial file. Nothing is ever removed from `DIR`; whatever reads it can delete files once it is done with them. The directory is useful for feeding new and updated files to another tool, such as a document importer's consume folder.
 
 While copying, a progress line is printed every 2 seconds (files done, bytes, speed). With `--file-progress`, files above the size threshold also get their own line showing how much has been written. Flags override the environment variables, which are convenient in a compose file:
 

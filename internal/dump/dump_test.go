@@ -517,6 +517,90 @@ func TestCountFolders(t *testing.T) {
 	}
 }
 
+// --- changes dir -------------------------------------------------------
+
+func TestChangesDir(t *testing.T) {
+	setup := func(t *testing.T) (src, dst string, opt Options) {
+		d := t.TempDir()
+		out := filepath.Join(d, "out")
+		src, dst = filepath.Join(d, "blob"), filepath.Join(out, "sub", "file.txt")
+		writeFile(t, src, "data")
+		return src, dst, Options{Jobs: 1, OutDir: out, ChangesDir: filepath.Join(d, "changes")}
+	}
+	changed := func(opt Options) string { return filepath.Join(opt.ChangesDir, "sub", "file.txt") }
+
+	t.Run("new file is hardline at the same relative path", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		log, _, _ := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		a, errA := os.Stat(dst)
+		b, errB := os.Stat(changed(opt))
+		if errA != nil || errB != nil || !os.SameFile(a, b) || st.Copied != 1 || st.Errors != 0 {
+			t.Fatalf("not linked: %v %v %+v", errA, errB, st)
+		}
+		if tmp, _ := filepath.Glob(filepath.Join(opt.ChangesDir, "sub", ".*.tmp")); len(tmp) != 0 {
+			t.Errorf("temp files left: %v", tmp)
+		}
+	})
+	t.Run("unchanged file is not placed", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		copyWithTimes(t, src, dst)
+		log, _, _ := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		if _, err := os.Stat(changed(opt)); err == nil || st.Skipped != 1 {
+			t.Errorf("unchanged file placed: %+v", st)
+		}
+	})
+	t.Run("updated file is placed again after consumer removed it", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		log, _, _ := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		if err := os.Remove(changed(opt)); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, src, "newer data")
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		got, err := os.ReadFile(changed(opt))
+		if err != nil || string(got) != "newer data" || st.Copied != 2 {
+			t.Errorf("got %q err %v stats %+v", got, err, st)
+		}
+	})
+	t.Run("pending different file is replaced", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		writeFile(t, changed(opt), "stale")
+		log, _, _ := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		got, _ := os.ReadFile(changed(opt))
+		if string(got) != "data" || st.Errors != 0 {
+			t.Errorf("got %q stats %+v", got, st)
+		}
+	})
+	t.Run("dry run does not touch changes dir", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		opt.DryRun = true
+		log, _, _ := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		if _, err := os.Stat(opt.ChangesDir); err == nil {
+			t.Error("dry run created changes dir")
+		}
+	})
+	t.Run("failure to place is reported as an error", func(t *testing.T) {
+		src, dst, opt := setup(t)
+		writeFile(t, opt.ChangesDir, "not a directory")
+		log, _, errb := testLogger()
+		var st Stats
+		executeCopies([]task{{src, dst}}, opt, &st, log)
+		if st.Errors != 1 || !strings.Contains(errb.String(), "changes dir") {
+			t.Errorf("%+v log=%q", st, errb.String())
+		}
+	})
+}
+
 // --- executeCopies -----------------------------------------------------
 
 func TestExecuteCopies(t *testing.T) {

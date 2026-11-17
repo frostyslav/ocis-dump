@@ -41,6 +41,10 @@ type Options struct {
 	// for in-flight files of at least FileProgressMinSize bytes.
 	FileProgress        bool
 	FileProgressMinSize int64
+	// ChangesDir, when set, also receives every file copied in this run (new
+	// or updated), at the same relative path as in OutDir. Files are
+	// hardline when possible and copied otherwise.
+	ChangesDir string
 }
 
 // Stats accumulates copy statistics.
@@ -290,7 +294,7 @@ func needsCopy(src, dst string) bool {
 func copyReason(src, dst string) string {
 	dstSt, err := os.Stat(dst)
 	if err != nil {
-		return "destination missing"
+		return "destination: " + err.Error()
 	}
 	srcSt, err := os.Stat(src)
 	if err != nil {
@@ -330,6 +334,39 @@ func copyFile(src, dst string) (int64, error) {
 		return n, err
 	}
 	return n, os.Chtimes(dst, time.Now(), st.ModTime())
+}
+
+// placeChange makes dst, a file just written under outDir, also appear at the
+// same relative path under changesDir. It hardlinks when possible and copies
+// otherwise. The file is staged under a hidden temporary name and renamed into
+// place, so watchers of changesDir never see a partial file.
+func placeChange(dst, outDir, changesDir string) error {
+	rel, err := filepath.Rel(outDir, dst)
+	if err != nil {
+		return err
+	}
+	target := filepath.Join(changesDir, rel)
+	if dstSt, err := os.Stat(dst); err == nil {
+		if tSt, err := os.Stat(target); err == nil && os.SameFile(dstSt, tSt) {
+			return nil // already linked; it shows the new content
+		}
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	tmp := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+".ocis-dump.tmp")
+	_ = os.Remove(tmp)
+	if err := os.Link(dst, tmp); err != nil {
+		if _, err := copyFile(dst, tmp); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+	}
+	if err := os.Rename(tmp, target); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 type task struct{ src, dst string }
@@ -393,6 +430,11 @@ func executeCopies(tasks []task, opt Options, stats *Stats, log *logger) {
 		return
 	}
 
+	var outAbs, changesAbs string
+	if opt.ChangesDir != "" {
+		outAbs, _ = filepath.Abs(opt.OutDir)
+		changesAbs, _ = filepath.Abs(opt.ChangesDir)
+	}
 	jobs := max(opt.Jobs, 1)
 	in := make(chan task)
 	res := make(chan copyResult)
@@ -405,6 +447,11 @@ func executeCopies(tasks []task, opt Options, stats *Stats, log *logger) {
 			for t := range in {
 				flight.start(id, t)
 				r := processTask(t, opt.Force)
+				if r.status == "copied" && changesAbs != "" {
+					if err := placeChange(t.dst, outAbs, changesAbs); err != nil {
+						r.status, r.err = "error", fmt.Errorf("changes dir: %w", err)
+					}
+				}
 				flight.finish(id)
 				res <- r
 			}
